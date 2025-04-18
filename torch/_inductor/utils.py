@@ -556,8 +556,15 @@ def get_fused_kernel_name(node_schedule, descriptive_names):
     sources = sources
     return "_".join(["fused"] + sources)
 
+logged = 0
+kernel_gen_counter = 0
 
 def get_kernel_metadata(node_schedule, wrapper):
+    from .virtualized import V
+    from torchsyn.generator import get_kernel_generator, KernelType
+    from torchsyn.torchsyn_logging import get_file_logger
+    from torchsyn.triton_kernel.utils import extract_subgraph
+    triton_generator = get_kernel_generator(KernelType.TRITON_KERNEL)
     all_origins = aggregate_origins(node_schedule)
     inductor_nodes = [origin for origin in all_origins if origin.op == "call_function"]
 
@@ -595,21 +602,85 @@ def get_kernel_metadata(node_schedule, wrapper):
         f"Original ATen: [{', '.join(original_aten_dict.keys())}]"
     )
 
+    global logged
+    global kernel_gen_counter
+    global prev_orig_gm
+    global prev_subgraph
+    global prev_code
+
+    if 'prev_orig_gm' not in globals():
+        prev_orig_gm = None
+        prev_subgraph = None
+        prev_code = None
+
     # trace back to original node here
     detailed_metadata = [f"{wrapper.comment} Source node to ATen node mapping:"]
-    for original_node, nodes in sorted(from_node_dict.items()):
-        detailed_metadata.append(
-            f"{wrapper.comment}   {original_node} => {', '.join(sorted(nodes))}"
-        )
-
     # print the aot_autograd graph fragment
     if single_graph is not None:
         detailed_metadata.append(f"{wrapper.comment} Graph fragment:")
+        for original_node, nodes in sorted(from_node_dict.items()):
+            detailed_metadata.append(
+                f"{wrapper.comment}   {original_node} => {', '.join(sorted(nodes))}"
+            )
+            subgraph_nodes = inductor_nodes
+            new_graph = extract_subgraph(V.graph.orig_gm, subgraph_nodes)
+            curr_orig_gm = str(V.graph.orig_gm)
+            curr_subgraph = str(new_graph)
+            curr_code = str(new_graph.code)
+
+            content_changed = (
+                curr_orig_gm != prev_orig_gm or
+                curr_subgraph != prev_subgraph or
+                curr_code != prev_code
+            )
+
+            if content_changed:
+                original_fx_graph_logger = get_file_logger("original_fx_graph", triton_generator.get_current_kernelgen_path() + "/original_fx_graph.log", colored=False)
+                extracted_subgraph_logger = get_file_logger("extracted_subgraph", triton_generator.get_current_kernelgen_path() + "/extracted_subgraph.log", colored=False)
+                pythoncode_logger = get_file_logger("pythoncode", triton_generator.get_current_kernelgen_path() + f"/code_{kernel_gen_counter}.py", colored=False)
+
+                original_fx_graph_logger.info(f"{V.graph.orig_gm}")
+                extracted_subgraph_logger.info(f"{new_graph}")
+                pythoncode_logger.info(f"{new_graph.code}")
+
+                prev_orig_gm = curr_orig_gm
+                prev_subgraph = curr_subgraph
+                prev_code = curr_code
+
+                logged += 1
+                kernel_gen_counter += 1
         for n in inductor_nodes:
             # TODO(future): maybe refactor torch/fx/graph.py to make it easy to
             # generate python code for graph fragments
             detailed_metadata.append(f"{wrapper.comment}   {n.format_node()}")
+    else:
+        # Similar logic for the else case
+        curr_orig_gm = str(V.graph.orig_gm)
+        curr_subgraph = str(new_graph)
+        curr_code = str(new_graph.code)
 
+        content_changed = (
+            curr_orig_gm != prev_orig_gm or
+            curr_subgraph != prev_subgraph or
+            curr_code != prev_code
+        )
+
+        if content_changed:
+            original_fx_graph_logger = get_file_logger("original_fx_graph", triton_generator.get_current_kernelgen_path() + "/original_fx_graph.log", colored=False)
+            extracted_subgraph_logger = get_file_logger("extracted_subgraph", triton_generator.get_current_kernelgen_path() + "/extracted_subgraph.log", colored=False)
+            pythoncode_logger = get_file_logger("pythoncode", triton_generator.get_current_kernelgen_path() + f"/code_{kernel_gen_counter}.py", colored=False)
+
+            original_fx_graph_logger.info(f"{V.graph.orig_gm}")
+            extracted_subgraph_logger.info(f"{new_graph}")
+            pythoncode_logger.info(f"{new_graph.code}")
+
+            prev_orig_gm = curr_orig_gm
+            prev_subgraph = curr_subgraph
+            prev_code = curr_code
+
+            kernel_gen_counter += 1
+            logged += 1
+            
     return metadata, "\n".join(detailed_metadata)
 
 
